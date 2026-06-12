@@ -1,0 +1,18 @@
+# 原始数据文件和生成结果（体积过大或属于产物）
+result_*.txt
+*.tj
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Kimi internal plans
+.kimi/
