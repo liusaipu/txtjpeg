@@ -45,6 +45,14 @@ python txtjpeg.py decompress test_data_q80.tj test_data_decompress.txt
 python compare.py test_data_raw.txt test_data_decompress.txt
 ```
 
+### 批量 quality 对比
+
+```bash
+python benchmark_quality.py
+```
+
+会自动测试 quality=50/60/70/80/90/100，输出体积与精度对比表。
+
 ## 参数说明
 
 - `--quality`：JPEG 质量，1–100，默认 85。越大体积越大、误差越小。
