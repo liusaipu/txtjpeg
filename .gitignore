@@ -1,6 +1,8 @@
 # 原始数据文件和生成结果（体积过大或属于产物）
 result_*.txt
 *.tj
+test_data_*.txt
+test_data_*.tj
 
 # Python
 __pycache__/

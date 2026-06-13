@@ -17,9 +17,10 @@ import numpy as np
 from PIL import Image
 
 MAGIC = b"TXTJPEG\0"
-VERSION = 1
-HEADER_FMT = "<8sB B I I Q d d H"
+VERSION = 2
+HEADER_FMT = "<8sB B I I Q d d I H"
 # 后面依次是 fmt_str（长度由 fmt_len 决定）和 jpeg_len(uint64) + jpeg_data。
+# columns: 每行包含的 token 数，0 表示无换行。
 
 CHUNK_SIZE = 1 << 20  # 1 MiB
 
@@ -40,6 +41,29 @@ def _infer_format(path: str) -> str:
     else:
         decimals = len(token) - dot - 1
     return f"%{width}.{decimals}f,"
+
+
+def _infer_columns(path: str) -> int:
+    """检测文件每行包含多少个 token。
+
+    - 无换行时返回 0，解压时输出单行。
+    - 换行均匀时返回每行 token 数，解压时按原行宽恢复换行。
+    """
+    with open(path, "rb") as f:
+        data = f.read(1 << 20)  # 采样前 1 MiB
+    if b"\n" not in data and b"\r" not in data:
+        return 0
+    lines = data.splitlines()
+    if not lines:
+        return 0
+    # 忽略可能不完整的最后一行
+    counts = [line.count(b",") for line in lines[:-1] if line.strip()]
+    if not counts:
+        return 0
+    first = counts[0]
+    if all(c == first for c in counts):
+        return first
+    return first
 
 
 def _iter_floats(path: str, chunk_size: int = CHUNK_SIZE):
@@ -95,7 +119,12 @@ def compress(
     t0 = time.time()
 
     fmt_str = _infer_format(input_path)
+    columns = _infer_columns(input_path)
     print(f"[info] 检测到原始格式: {fmt_str!r}")
+    if columns:
+        print(f"[info] 检测到每行 {columns} 列")
+    else:
+        print("[info] 未检测到换行，输出将为单行")
 
     # 单遍流式读取：收集 float32 数组并统计 min/max
     print("[info] 正在解析浮点数...")
@@ -163,6 +192,7 @@ def compress(
         n,
         float(vmin),
         float(vmax),
+        columns,
         len(fmt_bytes),
     )
 
@@ -186,6 +216,7 @@ def compress(
         "n": n,
         "vmin": vmin,
         "vmax": vmax,
+        "columns": columns,
         "width": w,
         "height": h,
         "quality": quality,
@@ -211,6 +242,7 @@ def decompress(input_path: str, output_path: str) -> dict:
             n,
             vmin,
             vmax,
+            columns,
             fmt_len,
         ) = struct.unpack(HEADER_FMT, header)
 
@@ -223,7 +255,10 @@ def decompress(input_path: str, output_path: str) -> dict:
         (jpeg_len,) = struct.unpack("<Q", f.read(8))
         jpeg_data = f.read(jpeg_len)
 
-    print(f"[info] 容器: {w}x{h}, N={n}, quality={quality}, fmt={fmt_str!r}")
+    print(
+        f"[info] 容器: {w}x{h}, N={n}, quality={quality}, "
+        f"fmt={fmt_str!r}, columns={columns}"
+    )
 
     import io
 
@@ -237,12 +272,18 @@ def decompress(input_path: str, output_path: str) -> dict:
         values = pixels.astype(np.float64) / 255.0 * (vmax - vmin) + vmin
 
     print("[info] 正在写回文本...")
-    batch = 100000
     with open(output_path, "w", encoding="ascii") as f:
-        for i in range(0, n, batch):
-            chunk = values[i : i + batch]
-            # 按原始格式格式化并连续写入
-            f.write("".join(fmt_str % v for v in chunk))
+        if columns:
+            # 按原行宽恢复换行
+            for i in range(0, n, columns):
+                line_vals = values[i : i + columns]
+                f.write("".join(fmt_str % v for v in line_vals))
+                f.write("\n")
+        else:
+            batch = 100000
+            for i in range(0, n, batch):
+                chunk = values[i : i + batch]
+                f.write("".join(fmt_str % v for v in chunk))
 
     elapsed = time.time() - t0
     print(f"[info] 解压完成，耗时 {elapsed:.2f} 秒")
@@ -251,6 +292,7 @@ def decompress(input_path: str, output_path: str) -> dict:
         "n": n,
         "vmin": vmin,
         "vmax": vmax,
+        "columns": columns,
         "width": w,
         "height": h,
         "elapsed": elapsed,

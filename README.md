@@ -29,6 +29,22 @@ python txtjpeg.py decompress result.tj result_approx.txt
 python txtjpeg.py compress result.txt result.tj --quality 85 --shape 10000x5789
 ```
 
+### 测试流程示例
+
+```bash
+# 1. 生成 20 MB 测试数据（100 列）
+python generate_test_data.py
+
+# 2. 压缩（quality=80）
+python txtjpeg.py compress test_data_raw.txt test_data_q80.tj --quality 80
+
+# 3. 解压
+python txtjpeg.py decompress test_data_q80.tj test_data_decompress.txt
+
+# 4. 逐行比较并计算精度
+python compare.py test_data_raw.txt test_data_decompress.txt
+```
+
 ## 参数说明
 
 - `--quality`：JPEG 质量，1–100，默认 85。越大体积越大、误差越小。
@@ -49,7 +65,9 @@ python txtjpeg.py compress result.txt result.tj --quality 85 --shape 10000x5789
 
 ```
 Magic(8) + Version(1) + Quality(1) + Width(4) + Height(4) +
-N(8) + vmin(8) + vmax(8) + fmt_len(2) + fmt_str + jpeg_len(8) + jpeg_data
+N(8) + vmin(8) + vmax(8) + columns(4) + fmt_len(2) + fmt_str + jpeg_len(8) + jpeg_data
 ```
+
+`columns` 用于保存原始文件每行包含的浮点数个数，解压时恢复换行；`0` 表示原始文件无换行。
 
 所有整数均为小端序。`jpeg_data` 是一段标准 JPEG，可单独导出查看。
