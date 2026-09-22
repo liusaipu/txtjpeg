@@ -24,68 +24,114 @@ HEADER_FMT = "<8sB B I I Q d d I H"
 
 CHUNK_SIZE = 1 << 20  # 1 MiB
 
+# 数值字段的分隔符：逗号、换行、回车、空格与制表符。
+# 定宽字段中的空格只用于对齐，剔除后不影响数值本身。
+_TOKEN_SPLIT_RE = re.compile(rb"[, \t\r\n]+")
+# 按原始字节切出字段，保留字段的前导空格，用于校验字段宽度。
+_FIELD_RE = re.compile(rb"[^,\r\n]+")
+
+
+def _last_delim(data: bytes) -> int:
+    """返回数据中最后一个字段分隔符的位置；不存在时返回 -1。"""
+    return max(data.rfind(b","), data.rfind(b"\n"), data.rfind(b"\r"))
+
+
+def _to_float(token: bytes) -> float:
+    """将字段转换为浮点数；字段内含非数值内容时中止并报出该字段。"""
+    try:
+        return float(token)
+    except ValueError as exc:
+        raise ValueError(f"无法解析数值字段 {token[:32]!r}") from exc
+
 
 def _infer_format(path: str) -> str:
-    """从文件第一个 token 推断原始浮点格式，例如 '%9.2f,'。"""
+    """从文件首个字段推断原始数值格式模板，例如 '%9.2f,'。
+
+    推断依据为首个分隔符之前的字节数（字段宽度）与该字段中小数点之后的字符数
+    （小数位数）。推断结果随即在文件前 1 MiB 内的全部完整字段上复核，
+    出现不一致时中止压缩，不退化为通用格式。
+    """
     with open(path, "rb") as f:
-        data = f.read(4096)
-    comma = data.find(b",")
-    if comma == -1:
-        # 没有逗号时回退到通用格式
-        return "%g,"
-    token = data[:comma]
-    width = len(token)
-    dot = token.find(b".")
-    if dot == -1:
-        decimals = 0
-    else:
-        decimals = len(token) - dot - 1
-    return f"%{width}.{decimals}f,"
+        head = f.read(1 << 20)
+
+    first_match = _FIELD_RE.search(head)
+    if first_match is None:
+        raise ValueError("文件前 1 MiB 内没有出现数值字段，无法推断数值格式模板")
+    first = first_match.group().rstrip()
+    if b"." not in first:
+        raise ValueError(
+            f"首个数值字段 {first[:32]!r} 不含小数点，无法推断小数位数"
+        )
+
+    width = len(first)
+    decimals = width - first.rfind(b".") - 1
+    fmt_str = f"%{width}.{decimals}f,"
+
+    cut = _last_delim(head)
+    stop = len(head) if cut < 0 else cut
+    for match in _FIELD_RE.finditer(head, first_match.end(), stop):
+        field = match.group().rstrip()
+        if not field:
+            continue
+        dot = field.rfind(b".")
+        if len(field) != width or dot < 0 or len(field) - dot - 1 != decimals:
+            raise ValueError(
+                f"文件前 1 MiB 内出现与首个字段格式不一致的数值字段 "
+                f"{field[:32]!r}（首个字段宽度 {width}，小数 {decimals} 位）"
+            )
+    return fmt_str
 
 
 def _infer_columns(path: str) -> int:
-    """检测文件每行包含多少个 token。
+    """检测文件每行包含多少个数值字段。
 
     - 无换行时返回 0，解压时输出单行。
-    - 换行均匀时返回每行 token 数，解压时按原行宽恢复换行。
+    - 换行规则时返回每行字段数，解压时按原行宽恢复换行。
     """
     with open(path, "rb") as f:
         data = f.read(1 << 20)  # 采样前 1 MiB
     if b"\n" not in data and b"\r" not in data:
         return 0
     lines = data.splitlines()
-    if not lines:
+    if len(lines) < 2:
         return 0
-    # 忽略可能不完整的最后一行
-    counts = [line.count(b",") for line in lines[:-1] if line.strip()]
+    # 忽略可能被截断的最后一行
+    counts = []
+    for line in lines[:-1]:
+        toks = [t for t in _TOKEN_SPLIT_RE.split(line) if t]
+        if toks:
+            counts.append(len(toks))
     if not counts:
         return 0
-    first = counts[0]
-    if all(c == first for c in counts):
-        return first
-    return first
+    if any(c != counts[0] for c in counts):
+        print(f"[warn] 前 1 MiB 内换行结构不一致，按首行的 {counts[0]} 个字段处理")
+    return counts[0]
 
 
 def _iter_floats(path: str, chunk_size: int = CHUNK_SIZE):
-    """流式迭代文件中的所有浮点数，内存友好。"""
+    """流式迭代文件中的所有浮点数，内存友好。
+
+    逗号、换行与回车均视为字段分隔符；跨块的不完整字段保存在 carry 缓冲区，
+    与下一块拼接后再解析。
+    """
     carry = b""
     with open(path, "rb") as f:
         while True:
             chunk = f.read(chunk_size)
             if not chunk:
-                if carry.strip():
-                    yield float(carry.strip())
+                token = carry.strip()
+                if token:
+                    yield _to_float(token)
                 break
             data = carry + chunk
-            last_comma = data.rfind(b",")
-            if last_comma == -1:
+            cut = _last_delim(data)
+            if cut < 0:
                 carry = data
                 continue
-            tokens = data[:last_comma].split(b",")
-            for tok in tokens:
-                if tok:
-                    yield float(tok.strip())
-            carry = data[last_comma + 1 :]
+            for token in _TOKEN_SPLIT_RE.split(data[:cut]):
+                if token:
+                    yield _to_float(token)
+            carry = data[cut + 1 :]
 
 
 def _compute_shape(n: int, shape: Tuple[int, int] | None = None) -> Tuple[int, int]:
